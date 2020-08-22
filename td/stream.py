@@ -3,6 +3,7 @@ import csv
 import io
 import json
 import os
+import textwrap
 import unicodedata
 import urllib
 
@@ -11,9 +12,9 @@ from typing import Union
 
 import websockets
 
-from td.fields import CSV_FIELD_KEYS
-from td.fields import CSV_FIELD_KEYS_LEVEL_2
-from td.fields import STREAM_FIELD_IDS
+from td.enums import CSV_FIELD_KEYS
+from td.enums import CSV_FIELD_KEYS_LEVEL_2
+from td.enums import STREAM_FIELD_IDS
 
 
 class TDStreamerClient():
@@ -530,7 +531,7 @@ class TDStreamerClient():
         self.print_to_console = print_to_console
 
         # Connect to the Websocket.
-        self.loop.run_until_complete(self._connect(pipeline_start=False))
+        self.loop.run_until_complete(self._connect())
 
         # Send the Request.
         asyncio.ensure_future(self._send_message(self._build_data_request()))
@@ -562,26 +563,34 @@ class TDStreamerClient():
 
     async def close_stream(self) -> None:
         """Closes the connection to the streaming service."""        
-
-        print('Connection with server closed, beginning close process...')
         
         # close the connection.
         await self.connection.close()
 
+        # Define the Message.
+        message = textwrap.dedent("""
+        {lin_brk}
+        CLOSING PROCESS INITIATED:
+        {lin_brk}
+        WebSocket Closed: True
+        Event Loop Closed: True
+        {lin_brk}
+        """).format(lin_brk="="*80)
+        
         # Shutdown all asynchronus generators.
         await self.loop.shutdown_asyncgens()
 
         # Stop the loop.
         if self.loop.is_running():
             self.loop.call_soon_threadsafe(self.loop.stop())
-        
-        self.loop.close()
+            print(message)
+            await asyncio.sleep(3)
 
-        # Once closed, verify it's closed.
-        if self.loop.is_closed():
-            print('Event loop was closed.')
-        else:            
-            print('Event loop was not closed.')
+        # # Once closed, verify it's closed.
+        # if self.loop.is_closed():
+        #     print('Event loop was closed.')
+        # else:            
+        #     print('Event loop was not closed.')
 
         # # cancel all the task.
         # for index, task in enumerate(asyncio.Task.all_tasks()):
@@ -597,7 +606,7 @@ class TDStreamerClient():
         #     except asyncio.CancelledError:
         #         print("main(): cancel_me is cancelled now")
 
-    async def _connect(self, pipeline_start: bool = True) -> websockets.WebSocketClientProtocol:
+    async def _connect(self) -> websockets.WebSocketClientProtocol:
         """Connects the Client to the TD Websocket.
 
         Connecting to webSocket server websockets.client.connect 
@@ -621,21 +630,13 @@ class TDStreamerClient():
         # Create a connection.
         self.connection = await websockets.client.connect(self.websocket_url)
 
-        # check it before sending it back.
-        if await self._check_connection() and pipeline_start == True:
+        # See if we are connected.
+        is_connected = await self._check_connection()
 
-            # Login to the stream.
+        # If we are connected then login.
+        if is_connected:
             await self._send_message(login_request)
-            await self._receive_message(return_value=True)
             return self.connection
-        
-        else:
-
-            # Login to the stream.
-            await self._send_message(login_request)
-            await self._receive_message(return_value=False)
-            return self.connection
-
 
     async def _check_connection(self) -> bool:
         """Determines if we have an active connection
@@ -714,16 +715,16 @@ class TDStreamerClient():
                 elif self.print_to_console:
                     print('='*20)
                     print('Message Received:')
-                    print('')
+                    print('-'*20)
                     print(message_decoded)
                     print('-'*20)
-                    print('')                  
+                    print('')         
 
             except websockets.exceptions.ConnectionClosed:
 
                 # stop the connection if there is an error.
                 await self.close_stream()
-                break               
+                break           
 
     async def _parse_json_message(self, message: str) -> dict:
         """Parses incoming messages from the stream

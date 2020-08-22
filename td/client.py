@@ -6,35 +6,34 @@ import pathlib
 import requests
 import urllib.parse
 
-from . import defaults
+from typing import Any
 from typing import Dict
 from typing import List
+from typing import Union
 from typing import Optional
-from typing import Any
+
+from td.utils import StatePath
+from td.utils import TDUtilities
+
 from td.orders import Order
 from td.orders import OrderLeg
-from td.defaults import StatePath
 from td.stream import TDStreamerClient
-from td.fields import VALID_CHART_VALUES
-from td.fields import ENDPOINT_ARGUMENTS
-from td.app.auth import FlaskTDAuth
+from td.option_chain import OptionChain
+
+from td.enums import VALID_CHART_VALUES
+from td.enums import ENDPOINT_ARGUMENTS
+
 from td.oauth import run
 from td.oauth import shutdown
+from td.app.auth import FlaskTDAuth
 
-class TknExpError(Exception):
-    """Raise exception when refresh or access token is expired.
-
-    Args:
-        Exception (Exception): The base python exception class
-    """
-    def __init__(self, message):
-        """Print out message for this exception.
-
-        Args:
-            message (str): Pass in the message returned by the server.
-        """
-        self.message = message
-        super().__init__(self.message)
+from td.exceptions import TknExpError
+from td.exceptions import ExdLmtError
+from td.exceptions import NotNulError
+from td.exceptions import ForbidError
+from td.exceptions import NotFndError
+from td.exceptions import ServerError
+from td.exceptions import GeneralError
 
 class TDClient():
 
@@ -115,6 +114,7 @@ class TDClient():
         self.account_number = account_number
         self.credentials_path = StatePath(credentials_file=credentials_path)
         self._redirect_code = None
+        self._td_utilities = TDUtilities()
 
         if self.auth_flow == 'flask':
             self._flask_app = FlaskTDAuth(
@@ -125,7 +125,7 @@ class TDClient():
         else:
             self._flask_app = None
         
-        # define a new attribute called 'authstate' and initalize it to '' (Blank). This will be used by our login function.
+        # define a new attribute called 'authstate' and initialize to `False`. This will be used by our login function.
         self.authstate = False
 
         # call the state_manager method and update the state to init (initalized)
@@ -215,7 +215,7 @@ class TDClient():
         credentials_file_exists = credentials_file.does_credentials_file_exist
         
         # If it's a directory, then create json setting path.
-        if credentials_file.is_dir:
+        if credentials_file.credentials_file.is_dir():
             credentials_file_path = credentials_file.json_library_path()
         else:
             credentials_file_path = credentials_file.credentials_file.absolute()
@@ -556,8 +556,8 @@ class TDClient():
         else:
             order_id = ''
 
+        # If it's okay and we need details, then add them.
         if response.ok and order_details:
-
             response_dict = {
                 'order_id':order_id,
                 'headers':response_headers,
@@ -569,22 +569,26 @@ class TDClient():
 
             return response_dict
 
+        # If it's okay and no details.
         elif response.ok:
-
             return response.json()
 
         else:
-            
-            print('='*80)
-            print("RESPONSE STATUS CODE: {status_code}".format(status_code=status_code))
-            print("RESPONSE URL: {url}".format(url=response.url))
-            print("RESPONSE HEADERS: {headers}".format(headers=response.headers))
-            print("RESPONSE PARAMS: {params}".format(params=response.links))
-            print("RESPONSE TEXT: {text}".format(text=response.text))
-            print('-'*80)
 
-            if response.status_code == 401:
+            if response.status_code == 400:
+                raise NotNulError(message=response.text)
+            elif response.status_code == 401:
                 raise TknExpError(message=response.text)
+            elif response.status_code == 403:
+                raise ForbidError(message=response.text)
+            elif response.status_code == 404:
+                raise NotFndError(message=response.text)
+            elif response.status_code == 429:
+                raise ExdLmtError(message=response.text)
+            elif response.status_code == 500 or response.status_code == 503:
+                raise ServerError(message=response.text)
+            elif response.status_code > 400:
+                raise GeneralError(message=response.text)
 
     def _validate_arguments(self, endpoint: str, parameter_name: str, parameter_argument: List[str]) -> bool:
         """Validates arguments for an API call.
@@ -659,7 +663,7 @@ class TDClient():
 
         Usage:
         ----
-            >>> SessionObject._prepare_arguments_list(parameter_list = ['MSFT', 'SQ'])
+            >>> td_client._prepare_arguments_list(parameter_list = ['MSFT', 'SQ'])
         """
 
         return ','.join(parameter_list)
@@ -681,8 +685,8 @@ class TDClient():
 
         Usage:
         ----
-            >>> SessionObject.get_quotes(instruments=['MSFT'])
-            >>> SessionObject.get_quotes(instruments=['MSFT','SQ'])
+            >>> td_client.get_quotes(instruments=['MSFT'])
+            >>> td_client.get_quotes(instruments=['MSFT','SQ'])
 
         """
         # because we have a list argument, prep it for the request.
@@ -700,7 +704,7 @@ class TDClient():
         # return the response of the get request.
         return self._make_request(method='get', endpoint=endpoint, params=params)
 
-    def get_price_history(self, symbol: str, period_type:str = None, period=None, start_date:str = None, end_date:str = None,
+    def get_price_history(self, symbol: str, period_type:str = None, period: str = None, start_date:str = None, end_date:str = None,
                           frequency_type: str = None, frequency: str = None, extended_hours: bool = True) -> Dict:
         """Gets historical candle data for a financial instrument.
         
@@ -743,17 +747,13 @@ class TDClient():
         elif (not start_date and not end_date and period):
 
             # Attempt to grab the key, if it fails we know there is an error.
-            try:
+            # check if the period is valid.
+            if int(period) in VALID_CHART_VALUES[frequency_type][period_type]:
+                True
+            else:
+                raise IndexError('Invalid Period.')
 
-                # check if the period is valid.
-                if period in VALID_CHART_VALUES[frequency_type][period_type]:
-                    True
-                else:
-                    raise IndexError('Invalid Period.')
-            except:
-                raise KeyError('Invalid Frequency Type or Period Type you passed through is not valid')
-
-            if frequency_type == 'minute' and frequency not in [1, 5, 10, 15, 30]:
+            if frequency_type == 'minute' and int(frequency) not in [1, 5, 10, 15, 30]:
                 raise ValueError('Invalid Minute Frequency, must be 1,5,10,15,30')
 
         # build the params dictionary
@@ -811,11 +811,11 @@ class TDClient():
 
         Usage:
         ----
-            >>> SessionObject.search_instrument(symbol = 'XYZ', projection = 'symbol-search')
-            >>> SessionObject.search_instrument(symbol = 'XYZ.*', projection = 'symbol-regex')
-            >>> SessionObject.search_instrument(symbol = 'FakeCompany', projection = 'desc-search')
-            >>> SessionObject.search_instrument(symbol = 'XYZ.[A-C]', projection = 'desc-regex')
-            >>> SessionObject.search_instrument(symbol = 'XYZ.[A-C]', projection = 'fundamental')
+            >>> td_client.search_instrument(symbol = 'XYZ', projection = 'symbol-search')
+            >>> td_client.search_instrument(symbol = 'XYZ.*', projection = 'symbol-regex')
+            >>> td_client.search_instrument(symbol = 'FakeCompany', projection = 'desc-search')
+            >>> td_client.search_instrument(symbol = 'XYZ.[A-C]', projection = 'desc-regex')
+            >>> td_client.search_instrument(symbol = 'XYZ.[A-C]', projection = 'fundamental')
 
         """
 
@@ -854,7 +854,7 @@ class TDClient():
         
         Usage:
         ----
-            >>> SessionObject.get_instruments(cusip='SomeCUSIPNumber')
+            >>> td_client.get_instruments(cusip='SomeCUSIPNumber')
 
         """
 
@@ -892,8 +892,8 @@ class TDClient():
 
         Usage:
         ----
-            >>> SessionObject.get_market_hours(markets = ['EQUITY'], date = '2019-10-19')
-            >>> SessionObject.get_market_hours(markets = ['EQUITY','FOREX'], date = '2019-10-19')
+            >>> td_client.get_market_hours(markets = ['EQUITY'], date = '2019-10-19')
+            >>> td_client.get_market_hours(markets = ['EQUITY','FOREX'], date = '2019-10-19')
 
         """
 
@@ -943,8 +943,8 @@ class TDClient():
 
         Usage:
         ----
-            >>> SessionObject.get_movers(market='$DJI', direction='up', change='value')
-            >>> SessionObject.get_movers(market='$COMPX', direction='down', change='percent')
+            >>> td_client.get_movers(market='$DJI', direction='up', change='value')
+            >>> td_client.get_movers(market='$COMPX', direction='down', change='percent')
         """
 
         # grabs a dictionary representation of our arguments and their inputs.
@@ -974,12 +974,13 @@ class TDClient():
         # return the response of the get request.
         return self._make_request(method='get', endpoint=endpoint, params=params)
 
-    def get_options_chain(self, option_chain: Dict) -> Dict:
+    def get_options_chain(self, option_chain: Union[Dict, OptionChain]) -> Dict:
         """Returns Option Chain Data and Quotes.
 
         Get option chain for an optionable Symbol using one of two methods. Either,
-        use the OptionChain object which is a built-in object that allows for easy creation of the
-        POST request. Otherwise, can pass through a dictionary of all the arguments needed.
+        use the OptionChain object which is a built-in object that allows for easy creation
+        of the POST request. Otherwise, can pass through a dictionary of all the 
+        arguments needed.
 
         Documentation:
         ----
@@ -992,14 +993,22 @@ class TDClient():
 
         Usage:
         ----
-            >>> SessionObject.get_options_chain(option_chain={'key1':'value1'})
+            >>> td_client.get_options_chain(option_chain={'key1':'value1'})
         """
+
+        # First check if it's an `OptionChain` object.
+        if isinstance(option_chain, OptionChain):
+
+            # If it is, then grab the params.
+            params = option_chain.query_parameters
+        
+        else:
+
+            # Otherwise just take the raw dictionary.
+            params = option_chain
 
         # define the endpoint
         endpoint = 'marketdata/chains'
-
-        # otherwise take the args dictionary.
-        params = option_chain
 
         # return the response of the get request.
         return self._make_request(method='get', endpoint=endpoint, params=params)
@@ -1035,8 +1044,8 @@ class TDClient():
 
         Usage:
         ----
-            >>> SessionObject.get_accounts(account='all', fields=['orders'])
-            >>> SessionObject.get_accounts(account='MyAccountNumber', fields=['orders','positions'])
+            >>> td_client.get_accounts(account='all', fields=['orders'])
+            >>> td_client.get_accounts(account='MyAccountNumber', fields=['orders','positions'])
 
         """
 
@@ -1109,10 +1118,10 @@ class TDClient():
 
         Usage:
         ----
-            >>> SessionObject.get_transactions(account = 'MyAccountNumber', transaction_type = 'ALL', start_date = '2019-01-31', end_date = '2019-04-28')
-            >>> SessionObject.get_transactions(account = 'MyAccountNumber', transaction_type = 'ALL', start_date = '2019-01-31')
-            >>> SessionObject.get_transactions(account = 'MyAccountNumber', transaction_type = 'TRADE')
-            >>> SessionObject.get_transactions(transaction_id = 'MyTransactionID')
+            >>> td_client.get_transactions(account = 'MyAccountNumber', transaction_type = 'ALL', start_date = '2019-01-31', end_date = '2019-04-28')
+            >>> td_client.get_transactions(account = 'MyAccountNumber', transaction_type = 'ALL', start_date = '2019-01-31')
+            >>> td_client.get_transactions(account = 'MyAccountNumber', transaction_type = 'TRADE')
+            >>> td_client.get_transactions(transaction_id = 'MyTransactionID')
 
         """
 
@@ -1150,8 +1159,11 @@ class TDClient():
                 'endDate': end_date
             }
 
+            if account is None and self.account_number:
+                account = self.account_number
+
             # define the endpoint
-            endpoint = '/accounts/{}/transactions'.format(account)
+            endpoint = 'accounts/{}/transactions'.format(account)
 
             # return the response of the get request.
             return self._make_request(method='get', endpoint=endpoint, params=params)
@@ -1180,7 +1192,7 @@ class TDClient():
 
         Usage:
         ----
-            >>> SessionObject.get_preferences(account='MyAccountNumber')
+            >>> td_client.get_preferences(account='MyAccountNumber')
         
         Returns:
         ----
@@ -1207,8 +1219,8 @@ class TDClient():
 
         Usage:
         ----
-            >>> SessionObject.get_streamer_subscription_keys(account=['MyAccountNumber'])
-            >>> SessionObject.get_streamer_subscription_keys(account=['MyAccountNumber1', 'MyAccountNumber2'])
+            >>> td_client.get_streamer_subscription_keys(account=['MyAccountNumber'])
+            >>> td_client.get_streamer_subscription_keys(account=['MyAccountNumber1', 'MyAccountNumber2'])
         """
 
 
@@ -1246,8 +1258,8 @@ class TDClient():
 
         Usage:
         ----
-            >>> SessionObject.get_user_principals(fields=['preferences'])
-            >>> SessionObject.get_user_principals(fields=['preferences','streamerConnectionInfo'])
+            >>> td_client.get_user_principals(fields=['preferences'])
+            >>> td_client.get_user_principals(fields=['preferences','streamerConnectionInfo'])
         """
 
         # validate arguments
@@ -1306,7 +1318,7 @@ class TDClient():
         
         Usage:
         ----
-            >>> SessionObject.update_preferences(account='MyAccountNumer', dataPayload=<Dictionary>)
+            >>> td_client.update_preferences(account='MyAccountNumer', dataPayload=<Dictionary>)
 
         """
 
@@ -1348,7 +1360,7 @@ class TDClient():
         Usage:
         ----
 
-            >>> SessionObject.create_watchlist(
+            >>> td_client.create_watchlist(
                 account = 'MyAccountNumber', 
                 name = 'MyWatchlistName', 
                 watchlistItems = {'key':'value'}
@@ -1388,8 +1400,8 @@ class TDClient():
         Usage:
         ----
 
-            >>> SessionObject.get_watchlist_accounts(account='all')
-            >>> SessionObject.get_watchlist_accounts(account='MyAccount1')
+            >>> td_client.get_watchlist_accounts(account='all')
+            >>> td_client.get_watchlist_accounts(account='MyAccount1')
 
         """
 
@@ -1422,7 +1434,7 @@ class TDClient():
         Usage:
         ----
 
-            >>> SessionObject.get_watchlist(
+            >>> td_client.get_watchlist(
                 account='MyAccount1',
                 watchlist_id='MyWatchlistId'
             )
@@ -1454,7 +1466,7 @@ class TDClient():
         Usage:
         ----
 
-            >>> SessionObject.delete_watchlist(
+            >>> td_client.delete_watchlist(
                 account='MyAccount1',
                 watchlist_id='MyWatchlistId'
             )
@@ -1491,7 +1503,7 @@ class TDClient():
         Usage:
         ----
 
-            >>> SessionObject.update_watchlist(
+            >>> td_client.update_watchlist(
                 account = 'MyAccountNumber', 
                 watchlist_id = 'WatchListID', 
                 watchlistItems = [WatchListItem1, WatchListItem2]
@@ -1537,7 +1549,7 @@ class TDClient():
         Usage:
         ----
 
-            >>> SessionObject.replace_watchlist(
+            >>> td_client.replace_watchlist(
                 account = 'MyAccountNumber', 
                 watchlist_id_new = 'WatchListIDNew', 
                 watchlist_id_old = 'WatchListIDOld', 
@@ -1612,7 +1624,7 @@ class TDClient():
 
         Usage:
         ----
-            >>> SessionObject.get_orders_path(
+            >>> td_client.get_orders_path(
                 account='MyAccountID',
                 max_results=6,
                 from_entered_time='2019-10-01',
@@ -1620,18 +1632,18 @@ class TDClient():
                 status='FILLED'
             )
             
-            >>> SessionObject.get_orders_path(
+            >>> td_client.get_orders_path(
                 account='MyAccountID',
                 max_results=6,
                 status='EXPIRED'
             )
             
-            >>> SessionObject.get_orders_path(
+            >>> td_client.get_orders_path(
                 account='MyAccountID',
                 status='REJECTED'
             )
             
-            >>> SessionObject.get_orders_query(
+            >>> td_client.get_orders_query(
                 account = 'MyAccountID'
             )
 
@@ -1697,7 +1709,7 @@ class TDClient():
         Usage:
         ----
 
-            >>> SessionObject.get_orders_query(
+            >>> td_client.get_orders_query(
                 account='MyAccountID',
                 max_results=6,
                 from_entered_time='2019-10-01',
@@ -1705,18 +1717,18 @@ class TDClient():
                 status='FILLED'
             )
 
-            >>> SessionObject.get_orders_query(
+            >>> td_client.get_orders_query(
                 account='MyAccountID',
                 max_results=6,
                 status='EXPIRED'
             )
 
-            >>> SessionObject.get_orders_query(
+            >>> td_client.get_orders_query(
                 account='MyAccountID',
                 status='REJECTED'
             )
 
-            >>> SessionObject.get_orders_query()
+            >>> td_client.get_orders_query()
 
         """
 
@@ -1756,7 +1768,7 @@ class TDClient():
         
         Usage:
         ----
-            >>> SessionObject.get_order(account='MyAccountID', order_id='MyOrderID')
+            >>> td_client.get_order(account='MyAccountID', order_id='MyOrderID')
         
         Returns:
         ----
@@ -1788,7 +1800,7 @@ class TDClient():
 
         Usage:
         ----
-            >>> SessionObject.cancel_order(account='MyAccountID', order_id='MyOrderID')
+            >>> td_client.cancel_order(account='MyAccountID', order_id='MyOrderID')
         
         Returns:
         ----
@@ -1817,7 +1829,7 @@ class TDClient():
 
         Usage:
         ----
-            >>> SessionObject.place_order(account='MyAccountID', order={'orderKey':'OrderValue'})
+            >>> td_client.place_order(account='MyAccountID', order={'orderKey':'OrderValue'})
         
         Returns:
         ----
@@ -1851,15 +1863,32 @@ class TDClient():
 
         Usage:
         ----
-            >>> SessionObject.place_order(account='MyAccountID', order={'orderKey':'OrderValue'})
+            >>> td_client.place_order(account='MyAccountID', order={'orderKey':'OrderValue'})
         
         Returns:
         ----
         {dict} -- A response dicitonary.
         """
+
+        # Check if it's an order.
+        if isinstance(order, Order):
+            order = order._grab_order()
+        else:
+            order = order
+
         # make the request
-        endpoint = 'accounts/{account_id}/orders/{order_id}'.format(account_id=account, order_id=order_id)
-        return self._make_request(method='put', endpoint=endpoint, mode='json', json=order, order_details=True)
+        endpoint = 'accounts/{account_id}/orders/{order_id}'.format(
+            account_id=account,
+            order_id=order_id
+        )
+
+        return self._make_request(
+            method='put',
+            endpoint=endpoint,
+            mode='json',
+            json=order,
+            order_details=True
+        )
 
     def get_saved_order(self, account: str, saved_order_id: str = None) -> Dict:
         """Grabs a saved order.
@@ -1879,7 +1908,7 @@ class TDClient():
         
         Usage:
         ----
-            >>> SessionObject.get_order(account='MyAccountID', saved_order_id='MyOrderID')
+            >>> td_client.get_order(account='MyAccountID', saved_order_id='MyOrderID')
 
         Returns:
         ----
@@ -1908,7 +1937,7 @@ class TDClient():
         
         Usage:
         ----
-            >>> SessionObject.cancel_order(account = 'MyAccountID', saved_order_id = 'MyOrderID')
+            >>> td_client.cancel_order(account = 'MyAccountID', saved_order_id = 'MyOrderID')
 
         Returns:
         ----
@@ -1937,7 +1966,7 @@ class TDClient():
 
         Usage:
         ----
-            >>> SessionObject.place_order(account='MyAccountID', saved_order={'orderKey':'OrderValue'})
+            >>> td_client.place_order(account='MyAccountID', saved_order={'orderKey':'OrderValue'})
         
         Returns:
         ----
@@ -1996,7 +2025,8 @@ class TDClient():
         
         # Grab the Streamer Info.
         userPrincipalsResponse = self.get_user_principals(
-            fields=['streamerConnectionInfo','streamerSubscriptionKeys','preferences','surrogateIds'])
+            fields=['streamerConnectionInfo','streamerSubscriptionKeys','preferences','surrogateIds']
+        )
 
 
         # Grab the timestampe.
@@ -2007,7 +2037,8 @@ class TDClient():
 
         # Parse the token timestamp.
         tokenTimeStampAsMs = self._create_token_timestamp(
-            token_timestamp=tokenTimeStamp)
+            token_timestamp=tokenTimeStamp
+        )
 
         # Define our Credentials Dictionary used for authentication.
         credentials = {
